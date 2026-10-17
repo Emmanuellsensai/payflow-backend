@@ -18,3 +18,18 @@ test("logging an object containing the keeper secret prints [Redacted]", () => {
   assert.ok(!out.includes("SABC123"));
   assert.equal(out.split("[Redacted]").length - 1, 2);
 });
+
+test("config validation errors name variables but never print their values", async () => {
+  const { loadConfig } = await import("../src/config.ts");
+  const env = {
+    PLAN_REGISTRY_ID: "C".repeat(56),
+    VAULT_ID: "C".repeat(56),
+    SUBSCRIPTION_ID: "C".repeat(56),
+    KEEPER_SECRET: "SSECRETVALUE",
+    PORT: "not-a-port",
+  };
+  assert.throws(
+    () => loadConfig(env),
+    (err: Error) => err.message.includes("PORT") && !err.message.includes("SSECRETVALUE") && !err.message.includes("not-a-port"),
+  );
+});
