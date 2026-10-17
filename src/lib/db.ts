@@ -91,6 +91,19 @@ const ADDED_COLUMNS: ReadonlyArray<[table: string, column: string, decl: string]
   ["mandates", "ended_by", "TEXT"],
 ];
 
+/**
+ * Indexes added after the first deployment. Each is created only when its
+ * table exists (a migration may run against a partially built database) and
+ * `IF NOT EXISTS` keeps repeated startups a no-op. These are covering indexes
+ * for the merchant and subscriber summary routes: the aggregates read only
+ * the indexed columns, so the planner never touches the table b-tree.
+ */
+const ADDED_INDEXES: ReadonlyArray<[table: string, name: string, columns: string]> = [
+  ["mandates", "mandates_merchant_status_period_amount", "merchant, status, period, amount"],
+  ["charges", "charges_merchant_amount", "merchant, amount"],
+  ["charges", "charges_subscriber_amount_fee", "subscriber, amount, fee"],
+];
+
 export function migrate(db: DatabaseSync): void {
   for (const [table, column, decl] of ADDED_COLUMNS) {
     const columns = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(table) as {
@@ -102,6 +115,13 @@ export function migrate(db: DatabaseSync): void {
     if (!columns.some((c) => c.name === column)) {
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
     }
+  }
+
+  for (const [table, name, columns] of ADDED_INDEXES) {
+    const exists = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(table);
+    if (exists) db.exec(`CREATE INDEX IF NOT EXISTS ${name} ON ${table}(${columns})`);
   }
 }
 

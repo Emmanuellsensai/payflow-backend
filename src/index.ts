@@ -23,6 +23,7 @@ const http = app.listen(config.PORT, () => {
 // waits for its pass to finish before scheduling the next. Overlapping passes
 // would race on the cursor and, for the keeper, on the account sequence number.
 const loops: Loop[] = [];
+let activeKeeper: Keeper | undefined;
 
 loops.push(
   every(config.INDEXER_INTERVAL_MS, async () => {
@@ -40,6 +41,7 @@ loops.push(
 
 if (config.KEEPER_ENABLED) {
   const keeper = new Keeper(db, server, config);
+  activeKeeper = keeper;
   logger.info({ keeper: keeper.publicKey }, "keeper enabled");
   loops.push(
     every(config.KEEPER_INTERVAL_MS, async () => {
@@ -55,6 +57,32 @@ if (config.KEEPER_ENABLED) {
 } else {
   logger.info("keeper disabled (KEEPER_ENABLED=false)");
 }
+
+/**
+ * Rotate the keeper key without downtime: update KEEPER_SECRET /
+ * KEEPER_SECRET_NEXT (and the rest of the env), then `kill -HUP <pid>`.
+ * Node re-reads `.env`, the config is re-validated and the running keeper
+ * swaps its signing keys mid-loop; the next successful pass logs that the
+ * previous key can be retired.
+ */
+process.on("SIGHUP", () => {
+  logger.info("SIGHUP received; reloading configuration");
+  try {
+    process.loadEnvFile();
+  } catch {
+    // No .env file to re-read; the process environment is the source of truth.
+  }
+  try {
+    const next = loadConfig();
+    if (activeKeeper) {
+      activeKeeper.reloadFromConfig(next);
+    } else {
+      logger.info("configuration reloaded; keeper is not running");
+    }
+  } catch (err) {
+    logger.error({ err }, "configuration reload failed; keeping the previous config");
+  }
+});
 
 let shuttingDown = false;
 

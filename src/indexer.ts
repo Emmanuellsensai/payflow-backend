@@ -2,7 +2,14 @@ import type { DatabaseSync } from "node:sqlite";
 import { rpc } from "@stellar/stellar-sdk";
 import type { Config } from "./config.ts";
 import { readCursor, writeCursor } from "./lib/db.ts";
-import { big, decodeEvent, num, str, type DecodedEvent } from "./lib/stellar.ts";
+import {
+  big,
+  decodeEvent,
+  num,
+  specProblems,
+  str,
+  type DecodedEvent,
+} from "./lib/stellar.ts";
 import { logger } from "./lib/logger.ts";
 
 /** RPC caps a single getEvents window; stay well inside it. */
@@ -12,9 +19,14 @@ const PAGE_LIMIT = 200;
 /** The RPC calls the indexer makes. Narrow so tests can supply a fake. */
 export type IndexerRpc = Pick<rpc.Server, "getLatestLedger" | "getHealth" | "getEvents">;
 
+/** What `apply` did with an event, so a pass can account for every one. */
+export type ApplyOutcome = "applied" | "mismatched" | "unknown";
+
 export interface TickResult {
   /** Events applied in this pass. */
   applied: number;
+  /** Events that failed contract-spec validation; reported, not projected. */
+  mismatched: number;
   /** Next ledger to read; everything before it has been indexed. */
   cursor: number;
   /** Latest ledger the RPC node reported. */
@@ -27,13 +39,29 @@ export interface IndexerStatus {
   latest: number;
   lastRunAt: number | null;
   lastError: string | null;
+  /**
+   * Events seen since process start that did not match the contract spec.
+   * A growing count means the contracts changed shape and the projection is
+   * silently missing data — check the warn logs for which events.
+   */
+  mismatchedEvents?: number;
 }
 
 export class Indexer {
   private readonly db: DatabaseSync;
   private readonly server: IndexerRpc;
   private readonly config: Config;
-  readonly status: IndexerStatus = { cursor: 0, latest: 0, lastRunAt: null, lastError: null };
+  readonly status: IndexerStatus = {
+    cursor: 0,
+    latest: 0,
+    lastRunAt: null,
+    lastError: null,
+    mismatchedEvents: 0,
+  };
+  /** Events since process start that failed spec validation. */
+  get mismatchedEvents(): number {
+    return this.status.mismatchedEvents ?? 0;
+  }
 
   constructor(db: DatabaseSync, server: IndexerRpc, config: Config) {
     this.db = db;
@@ -70,34 +98,16 @@ export class Indexer {
   }
 
   /**
-   * Index ledgers [cursor, min(cursor + LEDGER_WINDOW, latest)).
-   *
-   * The cursor is the next ledger to read and only advances after the whole
-   * range is applied, so a crash mid-range replays it on restart. Every apply
-   * path is idempotent to make that safe.
+   * Fetch every page of one ledger window. Cursor pages cannot carry
+   * `endLedger`, so events at or past `end` are dropped here; a short page does
+   * not prove the range is exhausted, only an empty page or the range end does.
    */
-  async tick(): Promise<TickResult> {
-    const latest = (await this.server.getLatestLedger()).sequence;
-    const start = await this.firstLedger(readCursor(this.db, 0));
-
-    this.status.latest = latest;
-    if (start > latest) {
-      this.status.cursor = start;
-      return { applied: 0, cursor: start, latest };
-    }
-
-    // endLedger is exclusive. Including `latest` would read a ledger that is
-    // still being ingested and could miss part of it.
-    const end = Math.min(start + LEDGER_WINDOW, latest);
-    if (end <= start) {
-      this.status.cursor = start;
-      return { applied: 0, cursor: start, latest };
-    }
-
-    const filters: rpc.Api.EventFilter[] = [
-      { type: "contract", contractIds: this.contractIds() },
-    ];
-    let applied = 0;
+  private async fetchWindow(
+    start: number,
+    end: number,
+    filters: rpc.Api.EventFilter[],
+  ): Promise<rpc.Api.EventResponse[]> {
+    const events: rpc.Api.EventResponse[] = [];
     let page = await this.server.getEvents({
       startLedger: start,
       endLedger: end,
@@ -108,25 +118,84 @@ export class Indexer {
     for (;;) {
       let pastEnd = false;
       for (const raw of page.events ?? []) {
-        // Cursor pages cannot carry endLedger, so stop at the boundary here.
         if (raw.ledger >= end) {
           pastEnd = true;
           break;
         }
-        const decoded = decodeEvent(raw);
-        if (!decoded) continue;
-        this.apply(decoded);
-        applied += 1;
+        events.push(raw);
       }
-      // A short page does not prove the range is exhausted: RPC caps how many
-      // ledgers one request scans. Only an empty page or the range end does.
       if (pastEnd || (page.events ?? []).length === 0 || !page.cursor) break;
       page = await this.server.getEvents({ cursor: page.cursor, filters, limit: PAGE_LIMIT });
     }
+    return events;
+  }
 
-    writeCursor(this.db, end);
-    this.status.cursor = end;
-    return { applied, cursor: end, latest };
+  /**
+   * Index ledgers [cursor, min(cursor + LEDGER_WINDOW * concurrency, latest)).
+   *
+   * Up to `INDEXER_FETCH_CONCURRENCY` windows are fetched in parallel, but
+   * their events are applied in ledger order and the cursor only advances after
+   * a window has been applied. If a fetch fails, windows already applied keep
+   * their cursor and the next pass resumes at the failed one. A crash mid-range
+   * replays that range on restart; every apply path is idempotent so that is
+   * safe.
+   */
+  async tick(): Promise<TickResult> {
+    const latest = (await this.server.getLatestLedger()).sequence;
+    const start = await this.firstLedger(readCursor(this.db, 0));
+
+    this.status.latest = latest;
+    if (start > latest) {
+      this.status.cursor = start;
+      return { applied: 0, mismatched: 0, cursor: start, latest };
+    }
+
+    // endLedger is exclusive. Including `latest` would read a ledger that is
+    // still being ingested and could miss part of it.
+    const end = Math.min(start + LEDGER_WINDOW, latest);
+    if (end <= start) {
+      this.status.cursor = start;
+      return { applied: 0, mismatched: 0, cursor: start, latest };
+    }
+
+    const filters: rpc.Api.EventFilter[] = [
+      { type: "contract", contractIds: this.contractIds() },
+    ];
+    const concurrency = Math.max(1, this.config.INDEXER_FETCH_CONCURRENCY ?? 1);
+    const windows: Array<{ start: number; end: number }> = [];
+    for (let s = start; s < latest && windows.length < concurrency; s += LEDGER_WINDOW) {
+      windows.push({ start: s, end: Math.min(s + LEDGER_WINDOW, latest) });
+    }
+
+    const fetched = await Promise.allSettled(
+      windows.map((w) => this.fetchWindow(w.start, w.end, filters)),
+    );
+    let applied = 0;
+    let mismatched = 0;
+    let cursor = start;
+    let failure: unknown;
+
+    for (let i = 0; i < windows.length; i += 1) {
+      const result = fetched[i]!;
+      if (result.status === "rejected") {
+        failure = result.reason;
+        break;
+      }
+      for (const raw of result.value) {
+        const decoded = decodeEvent(raw);
+        if (!decoded) continue;
+        if (this.apply(decoded) !== "mismatched") applied += 1;
+        else mismatched += 1;
+      }
+      // Only advance after this window is applied, so a later failure resumes
+      // here instead of replaying what already landed.
+      cursor = windows[i]!.end;
+      writeCursor(this.db, cursor);
+    }
+
+    this.status.cursor = cursor;
+    if (failure !== undefined) throw failure;
+    return { applied, mismatched, cursor, latest };
   }
 
   /** Run passes until the cursor reaches the RPC's latest ledger. */
@@ -140,31 +209,66 @@ export class Indexer {
     return total;
   }
 
-  /** Route a decoded event to its projection. Unknown names are ignored. */
-  apply(e: DecodedEvent): void {
+  /**
+   * Route a decoded event to its projection, but only after it matches the
+   * committed contract spec (`src/lib/event_spec.json`).
+   *
+   * An event that fails validation is logged with every problem and counted
+   * in `mismatchedEvents`; it is never projected, so a renamed contract field
+   * surfaces immediately instead of silently storing zeros. Events whose name
+   * the spec does not cover are left to the switch below, which ignores
+   * unknown names.
+   */
+  apply(e: DecodedEvent): ApplyOutcome {
+    const problems = specProblems(e);
+    if (problems !== null && problems.length > 0) {
+      this.status.mismatchedEvents = this.mismatchedEvents + 1;
+      logger.warn(
+        {
+          name: e.name,
+          contractId: e.contractId,
+          ledger: e.ledger,
+          txHash: e.txHash,
+          problems,
+        },
+        "event does not match the contract spec; not applied",
+      );
+      return "mismatched";
+    }
+
     switch (e.name) {
       case "plan_created":
-        return this.onPlanCreated(e);
+        this.onPlanCreated(e);
+        return "applied";
       case "plan_status_changed":
-        return this.onPlanStatus(e);
+        this.onPlanStatus(e);
+        return "applied";
       case "subscribed":
-        return this.onSubscribed(e);
+        this.onSubscribed(e);
+        return "applied";
       case "charged":
-        return this.onCharged(e);
+        this.onCharged(e);
+        return "applied";
       case "cancelled":
-        return this.onStatus(e, "Cancelled", "subscriber");
+        this.onStatus(e, "Cancelled", "subscriber");
+        return "applied";
       case "mandate_ended":
-        return this.onStatus(e, "Cancelled", "merchant");
+        this.onStatus(e, "Cancelled", "merchant");
+        return "applied";
       case "mandate_completed":
-        return this.onStatus(e, "Completed");
+        this.onStatus(e, "Completed");
+        return "applied";
       case "pause_changed":
-        return this.onPauseChanged(e);
+        this.onPauseChanged(e);
+        return "applied";
       case "deposit":
       case "withdraw":
       case "debit":
-        return this.onVaultEvent(e);
+        this.onVaultEvent(e);
+        return "applied";
       default:
         logger.debug({ name: e.name }, "unhandled event");
+        return "unknown";
     }
   }
 

@@ -6,6 +6,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Config } from "./config.ts";
 import type { IndexerStatus } from "./indexer.ts";
 import { buildRoutes } from "./routes/index.ts";
+import type { HealthResponse } from "./routes/types.ts";
 import { logger } from "./lib/logger.ts";
 import { withSpan } from "./lib/telemetry.ts";
 
@@ -42,7 +43,7 @@ export function createApp(db: DatabaseSync, config: Config, indexer?: IndexerSta
   // body says whether the projection is current.
   app.get("/health", (_req, res) => {
     const lag = indexer && indexer.latest > 0 ? Math.max(0, indexer.latest - indexer.cursor) : null;
-    res.json({
+    const body: HealthResponse = {
       status: lag === null ? "starting" : lag <= MAX_LAG ? "ok" : "catching_up",
       network: config.STELLAR_NETWORK,
       indexer: indexer
@@ -52,6 +53,7 @@ export function createApp(db: DatabaseSync, config: Config, indexer?: IndexerSta
             lag,
             lastRunAt: indexer.lastRunAt ? new Date(indexer.lastRunAt).toISOString() : null,
             lastError: indexer.lastError,
+            mismatchedEvents: indexer.mismatchedEvents ?? 0,
           }
         : null,
       contracts: {
@@ -59,7 +61,8 @@ export function createApp(db: DatabaseSync, config: Config, indexer?: IndexerSta
         vault: config.VAULT_ID,
         subscription: config.SUBSCRIPTION_ID,
       },
-    });
+    };
+    res.json(body);
   });
 
   app.use("/api", buildRoutes(db));

@@ -111,6 +111,28 @@ describe("http api", () => {
     assert.equal((body.charges as unknown[]).length, 1);
   });
 
+  test("batch mandate lookup omits unknown ids", async () => {
+    const { body } = await get("/api/mandates?ids=1,2,999");
+    const rows = body.mandates as unknown as { id: number }[];
+    assert.deepEqual(
+      rows.map((r) => r.id), // ORDER BY id DESC, as the list endpoint always does
+      [2, 1],
+    );
+  });
+
+  test("batch mandate lookup rejects more than 100 ids", async () => {
+    const ids = Array.from({ length: 101 }, (_, i) => i + 1).join(",");
+    const { status, body } = await get(`/api/mandates?ids=${ids}`);
+    assert.equal(status, 400);
+    assert.equal(body.error, "too_many_ids");
+  });
+
+  test("batch mandate lookup rejects a non-numeric id", async () => {
+    const { status, body } = await get("/api/mandates?ids=1,nope");
+    assert.equal(status, 400);
+    assert.equal(body.error, "invalid_ids");
+  });
+
   test("merchant summary computes MRR, ARR and revenue", async () => {
     const { body } = await get(`/api/merchants/${MERCHANT}/summary`);
     assert.equal(body.activeMandates, 1);

@@ -16,6 +16,7 @@ const config = {
   VAULT_ID: CONTRACT,
   SUBSCRIPTION_ID: CONTRACT,
   INDEXER_START_LEDGER: 0,
+  INDEXER_FETCH_CONCURRENCY: 1,
   NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
   // A throwaway testnet key; the fake RPC never submits anything.
   KEEPER_SECRET: "SBK2VIYYSVG76E7VC3QHYARNFLY2EAQXDHRC7BMXBBGIFG74ARPRMNQM",
@@ -68,6 +69,30 @@ function fakeRpc(chain: FakeChain, pageSize = 200): IndexerRpc {
       return { events: page, cursor: String(offset), latestLedger: chain.latest } as never;
     },
   } as unknown as IndexerRpc;
+}
+
+/**
+ * Wraps the fake RPC with a small delay and records how many requests overlap.
+ * The delay is what makes concurrent fetches observable to the test.
+ */
+function trackingRpc(chain: FakeChain, pageSize = 200) {
+  const base = fakeRpc(chain, pageSize);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const rpc = {
+    ...base,
+    getEvents: async (req: Record<string, unknown>) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return await base.getEvents(req as never);
+      } finally {
+        inFlight -= 1;
+      }
+    },
+  } as unknown as IndexerRpc;
+  return { rpc, maxInFlight: () => maxInFlight };
 }
 
 function plans(db: ReturnType<typeof openDatabase>): number[] {
@@ -127,6 +152,72 @@ describe("indexer sync", () => {
     assert.deepEqual(plans(db), [1, 2, 3]);
     assert.equal(r.cursor, 8_010, "one window of 8000 ledgers");
     assert.ok(chain.calls.some((c) => c.cursor !== undefined), "a cursor page was requested");
+  });
+
+  test("fetching windows concurrently gives the same result as sequential", async () => {
+    const events = [
+      rawEvent(10, 1),
+      rawEvent(9_000, 2),
+      rawEvent(17_000, 3),
+      rawEvent(24_999, 4),
+    ];
+    const sequentialDb = openDatabase(":memory:");
+    const sequential = new Indexer(
+      sequentialDb,
+      fakeRpc({ latest: 25_000, oldest: 1, events, calls: [] }),
+      { ...config, INDEXER_START_LEDGER: 10 },
+    );
+    const sequentialApplied = await sequential.catchUp();
+
+    const parallelDb = openDatabase(":memory:");
+    const tracker = trackingRpc({ latest: 25_000, oldest: 1, events, calls: [] });
+    const parallel = new Indexer(parallelDb, tracker.rpc, {
+      ...config,
+      INDEXER_START_LEDGER: 10,
+      INDEXER_FETCH_CONCURRENCY: 3,
+    });
+    const parallelApplied = await parallel.catchUp();
+
+    assert.deepEqual(plans(parallelDb), plans(sequentialDb));
+    assert.equal(parallelApplied, sequentialApplied);
+    assert.equal(readCursor(parallelDb, 0), readCursor(sequentialDb, 0));
+    assert.ok(tracker.maxInFlight() > 1, "windows were fetched concurrently");
+  });
+
+  test("a failed window keeps the cursor at the last applied window", async () => {
+    const db = openDatabase(":memory:");
+    const chain: FakeChain = {
+      latest: 25_000,
+      oldest: 1,
+      events: [rawEvent(10, 1), rawEvent(9_000, 2), rawEvent(17_000, 3)],
+      calls: [],
+    };
+    const base = fakeRpc(chain);
+    let failWindow = true;
+    const flaky = {
+      ...base,
+      getEvents: async (req: Record<string, unknown>) => {
+        if (failWindow && req.startLedger === 8_010) {
+          failWindow = false;
+          throw new Error("rpc unavailable");
+        }
+        return base.getEvents(req as never);
+      },
+    } as unknown as IndexerRpc;
+    const ix = new Indexer(db, flaky, {
+      ...config,
+      INDEXER_START_LEDGER: 10,
+      INDEXER_FETCH_CONCURRENCY: 3,
+    });
+
+    await assert.rejects(() => ix.tick(), /rpc unavailable/);
+    assert.equal(readCursor(db, 0), 8_010, "only the window that was applied advances the cursor");
+    assert.deepEqual(plans(db), [1]);
+
+    // The next pass resumes at the failed window and finishes the range.
+    const r = await ix.tick();
+    assert.equal(r.cursor, 25_000);
+    assert.deepEqual(plans(db), [1, 2, 3]);
   });
 
   test("catchUp runs passes until the cursor reaches the latest ledger", async () => {
@@ -236,6 +327,8 @@ describe("keeper", () => {
 });
 
 describe("loop", () => {
+  // Wall-clock budgets are generous: the assertion is about ordering, not
+  // speed, and a starved timer under parallel CI load must not fail them.
   test("never runs two passes at once", async () => {
     let running = 0;
     let maxRunning = 0;
@@ -247,7 +340,7 @@ describe("loop", () => {
       running -= 1;
       passes += 1;
     });
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 400));
     await loop.stop();
     assert.ok(passes >= 2, "the loop kept going");
     assert.equal(maxRunning, 1);
@@ -270,7 +363,7 @@ describe("loop", () => {
       passes += 1;
       throw new Error("boom");
     });
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 150));
     await loop.stop();
     assert.ok(passes >= 2);
   });

@@ -1,0 +1,157 @@
+{
+  "$comment": [
+    "Committed contract event spec for the Payflow protocol on Stellar.",
+    "Mirrors the Soroban contract spec of the v0.2.0 testnet deployment",
+    "(payflow-contract): one entry per #[contractevent] struct, topics after",
+    "the event-name symbol in declaration order, then the non-topic data",
+    "fields. The indexer validates every decoded event against this spec",
+    "before projecting it: a renamed or retyped contract field is reported and",
+    "counted, never silently stored as zero. Update this file together with",
+    "the contracts, and deploy the indexer before the new contract build."
+  ],
+  "version": "v0.2.0",
+  "types": {
+    "address": "G.../C... strkey",
+    "string": "utf8 string",
+    "boolean": "scval bool",
+    "u32": "unsigned 32-bit integer",
+    "u64": "unsigned 64-bit integer",
+    "i128": "signed 128-bit integer (money: keep as string/bigint)",
+    "timepoint": "u64 ledger timestamp"
+  },
+  "events": [
+    {
+      "name": "plan_created",
+      "contract": "plan_registry",
+      "topics": [
+        { "name": "merchant", "type": "address" },
+        { "name": "id", "type": "u64" }
+      ],
+      "data": [
+        { "name": "token", "type": "address" },
+        { "name": "amount", "type": "i128" },
+        { "name": "period", "type": "u64" },
+        { "name": "name", "type": "string", "optional": true }
+      ]
+    },
+    {
+      "name": "plan_status_changed",
+      "contract": "plan_registry",
+      "topics": [
+        { "name": "merchant", "type": "address" },
+        { "name": "id", "type": "u64" }
+      ],
+      "data": [{ "name": "active", "type": "boolean" }]
+    },
+    {
+      "name": "subscribed",
+      "contract": "subscription",
+      "topics": [
+        { "name": "id", "type": "u64" },
+        { "name": "subscriber", "type": "address" },
+        { "name": "merchant", "type": "address" }
+      ],
+      "data": [
+        { "name": "plan_id", "type": "u64" },
+        { "name": "amount", "type": "i128" },
+        { "name": "period", "type": "u64" },
+        { "name": "next_charge", "type": "timepoint" },
+        { "name": "max_charges", "type": "u32", "optional": true },
+        { "name": "fee_bps", "type": "u32", "optional": true }
+      ]
+    },
+    {
+      "name": "charged",
+      "contract": "subscription",
+      "topics": [
+        { "name": "id", "type": "u64" },
+        { "name": "subscriber", "type": "address" },
+        { "name": "merchant", "type": "address" }
+      ],
+      "data": [
+        { "name": "amount", "type": "i128" },
+        { "name": "fee", "type": "i128" },
+        { "name": "charges_made", "type": "u32" },
+        { "name": "next_charge", "type": "timepoint" }
+      ]
+    },
+    {
+      "name": "cancelled",
+      "contract": "subscription",
+      "topics": [
+        { "name": "id", "type": "u64" },
+        { "name": "subscriber", "type": "address" }
+      ],
+      "data": [{ "name": "charges_made", "type": "u32", "optional": true }]
+    },
+    {
+      "name": "mandate_ended",
+      "contract": "subscription",
+      "topics": [
+        { "name": "id", "type": "u64" },
+        { "name": "merchant", "type": "address" }
+      ],
+      "data": [
+        { "name": "subscriber", "type": "address", "optional": true },
+        { "name": "charges_made", "type": "u32", "optional": true }
+      ]
+    },
+    {
+      "name": "mandate_completed",
+      "contract": "subscription",
+      "topics": [
+        { "name": "id", "type": "u64" },
+        { "name": "subscriber", "type": "address", "optional": true }
+      ],
+      "data": [{ "name": "charges_made", "type": "u32", "optional": true }]
+    },
+    {
+      "name": "pause_changed",
+      "contract": "subscription",
+      "topics": [
+        { "name": "id", "type": "u64" },
+        { "name": "subscriber", "type": "address" }
+      ],
+      "data": [{ "name": "paused", "type": "boolean" }]
+    },
+    {
+      "name": "deposit",
+      "contract": "vault",
+      "topics": [
+        { "name": "user", "type": "address" },
+        { "name": "token", "type": "address" },
+        { "name": "counterparty", "type": "address", "optional": true }
+      ],
+      "data": [
+        { "name": "amount", "type": "i128" },
+        { "name": "balance", "type": "i128" }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "contract": "vault",
+      "topics": [
+        { "name": "user", "type": "address" },
+        { "name": "token", "type": "address" },
+        { "name": "counterparty", "type": "address", "optional": true }
+      ],
+      "data": [
+        { "name": "amount", "type": "i128" },
+        { "name": "balance", "type": "i128" }
+      ]
+    },
+    {
+      "name": "debit",
+      "contract": "vault",
+      "topics": [
+        { "name": "user", "type": "address" },
+        { "name": "token", "type": "address" },
+        { "name": "counterparty", "type": "address", "optional": true }
+      ],
+      "data": [
+        { "name": "amount", "type": "i128" },
+        { "name": "balance", "type": "i128" }
+      ]
+    }
+  ]
+}

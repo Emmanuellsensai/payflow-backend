@@ -11,6 +11,12 @@ const schema = z.object({
   TOKEN_ID: z.string().min(56).optional(),
 
   KEEPER_SECRET: z.string().optional(),
+  /**
+   * Standby key for zero-downtime rotation. When set, the keeper falls back
+   * to it if `KEEPER_SECRET` becomes unusable mid-pass, and accepts it as the
+   * new primary on SIGHUP without a restart.
+   */
+  KEEPER_SECRET_NEXT: z.string().optional(),
   KEEPER_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   KEEPER_ENABLED: z
     .string()
@@ -19,6 +25,12 @@ const schema = z.object({
 
   INDEXER_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
   INDEXER_START_LEDGER: z.coerce.number().int().nonnegative().default(0),
+  /**
+   * How many ledger windows one pass may fetch at once. Events are still
+   * applied in ledger order and the cursor advances per applied window; set
+   * this to 1 for strictly sequential reads.
+   */
+  INDEXER_FETCH_CONCURRENCY: z.coerce.number().int().positive().max(16).default(4),
 
   PORT: z.coerce.number().int().positive().default(8080),
   DATABASE_PATH: z.string().default("./payflow.db"),

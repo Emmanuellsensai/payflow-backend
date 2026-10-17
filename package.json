@@ -5,6 +5,12 @@
   "description": "Event indexer, settlement keeper, and REST API for the Payflow protocol on Stellar.",
   "license": "Apache-2.0",
   "type": "module",
+  "exports": {
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    }
+  },
   "engines": {
     "node": ">=22.5.0"
   },
