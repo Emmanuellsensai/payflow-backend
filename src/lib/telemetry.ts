@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 interface Span {
   traceId: string;
   spanId: string;
-  parentSpanId?: string;
+  parentSpanId?: string | undefined;
   name: string;
   start: bigint;
   end: bigint;
