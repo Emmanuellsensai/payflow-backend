@@ -147,6 +147,14 @@ that is arithmetic, not a bug.
 | `DATABASE_PATH` | `./payflow.db` | SQLite file |
 | `PORT` | `8080` | HTTP port |
 | `CORS_ORIGIN` | `*` | Comma-separated allowed origins |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP collector base URL. Unset disables tracing at no cost |
+| `SHUTDOWN_TIMEOUT_MS` | `15000` | How long shutdown waits for in-flight passes |
+
+Setting `OTEL_EXPORTER_OTLP_ENDPOINT` exports OpenTelemetry spans for every
+RPC call (`rpc.<method>`), indexer and keeper pass, and HTTP request. Every
+response carries an `X-Request-Id` (a caller-supplied id is reused), which also
+appears in the request logs. Secrets such as `KEEPER_SECRET` are redacted from
+logs.
 
 The keeper is **off** by default. Turning it on requires funding
 `KEEPER_SECRET` with XLM for transaction fees.

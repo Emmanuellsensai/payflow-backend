@@ -151,4 +151,13 @@ describe("http api", () => {
     assert.equal(status, 404);
     assert.equal(body.error, "not_found");
   });
+
+  test("every response carries an X-Request-Id, reusing the caller's", async () => {
+    const generated = await fetch(`${base}/health`);
+    assert.ok(generated.headers.get("x-request-id"));
+    const missing = await fetch(`${base}/nope`);
+    assert.ok(missing.headers.get("x-request-id"));
+    const echoed = await fetch(`${base}/health`, { headers: { "X-Request-Id": "abc-123" } });
+    assert.equal(echoed.headers.get("x-request-id"), "abc-123");
+  });
 });

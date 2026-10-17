@@ -6,8 +6,10 @@ import { Indexer } from "./indexer.ts";
 import { Keeper } from "./keeper.ts";
 import { logger } from "./lib/logger.ts";
 import { every, type Loop } from "./lib/loop.ts";
+import { initTelemetry, withSpan } from "./lib/telemetry.ts";
 
 const config = loadConfig();
+const stopTelemetry = initTelemetry(config.OTEL_EXPORTER_OTLP_ENDPOINT);
 const db = openDatabase(config.DATABASE_PATH);
 const server = makeRpc(config);
 
@@ -25,7 +27,7 @@ const loops: Loop[] = [];
 loops.push(
   every(config.INDEXER_INTERVAL_MS, async () => {
     try {
-      const r = await indexer.tick();
+      const r = await withSpan("indexer.pass", () => indexer.tick());
       indexer.status.lastRunAt = Date.now();
       indexer.status.lastError = null;
       if (r.applied > 0) logger.info({ events: r.applied, cursor: r.cursor }, "indexed");
@@ -42,7 +44,7 @@ if (config.KEEPER_ENABLED) {
   loops.push(
     every(config.KEEPER_INTERVAL_MS, async () => {
       try {
-        const results = await keeper.tick();
+        const results = await withSpan("keeper.pass", () => keeper.tick());
         const settled = results.filter((r) => r.status === "settled").length;
         if (results.length > 0) logger.info({ settled, attempted: results.length }, "keeper pass");
       } catch (err) {
@@ -54,14 +56,28 @@ if (config.KEEPER_ENABLED) {
   logger.info("keeper disabled (KEEPER_ENABLED=false)");
 }
 
-function shutdown(signal: string): void {
+let shuttingDown = false;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   logger.info({ signal }, "shutting down");
-  for (const loop of loops) loop.stop();
+  // Let a pass that is mid-write or mid-transaction finish before the database
+  // closes, but never hang forever on a stuck RPC call.
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), config.SHUTDOWN_TIMEOUT_MS);
+  });
+  const drained = Promise.all(loops.map((loop) => loop.stop())).then(() => "drained" as const);
+  const outcome = await Promise.race([drained, timedOut]);
+  clearTimeout(timer);
+  if (outcome === "timeout") logger.warn({ timeoutMs: config.SHUTDOWN_TIMEOUT_MS }, "passes still running; closing anyway");
+  await stopTelemetry().catch(() => {});
   http.close(() => {
     db.close();
     process.exit(0);
   });
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));

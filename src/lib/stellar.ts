@@ -1,10 +1,13 @@
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import type { Config } from "../config.ts";
+import { traceRpc } from "./telemetry.ts";
 
 export function makeRpc(config: Config): rpc.Server {
-  return new rpc.Server(config.SOROBAN_RPC_URL, {
-    allowHttp: config.SOROBAN_RPC_URL.startsWith("http://"),
-  });
+  return traceRpc(
+    new rpc.Server(config.SOROBAN_RPC_URL, {
+      allowHttp: config.SOROBAN_RPC_URL.startsWith("http://"),
+    }),
+  );
 }
 
 /** A contract event flattened into plain JS values. */

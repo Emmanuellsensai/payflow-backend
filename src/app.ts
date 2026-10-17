@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import { pinoHttp } from "pino-http";
@@ -6,6 +7,7 @@ import type { Config } from "./config.ts";
 import type { IndexerStatus } from "./indexer.ts";
 import { buildRoutes } from "./routes/index.ts";
 import { logger } from "./lib/logger.ts";
+import { withSpan } from "./lib/telemetry.ts";
 
 /** Ledgers the indexer may trail the network by before /health reports it. */
 const MAX_LAG = 120;
@@ -13,7 +15,26 @@ const MAX_LAG = 120;
 export function createApp(db: DatabaseSync, config: Config, indexer?: IndexerStatus): Express {
   const app = express();
 
-  app.use(pinoHttp({ logger }));
+  app.use(
+    pinoHttp({
+      logger,
+      // Accept a caller's id (bounded, so it cannot flood logs) or mint one.
+      genReqId: (req, res) => {
+        const given = req.headers["x-request-id"];
+        const id = typeof given === "string" && /^[\w.-]{1,128}$/.test(given) ? given : randomUUID();
+        res.setHeader("X-Request-Id", id);
+        return id;
+      },
+    }),
+  );
+  app.use((req, res, next) => {
+    void withSpan(`${req.method} request`, () => {
+      return new Promise<void>((resolve) => {
+        res.once("close", resolve);
+        next();
+      });
+    });
+  });
   app.use(cors({ origin: config.CORS_ORIGIN === "*" ? true : config.CORS_ORIGIN.split(",") }));
   app.use(express.json({ limit: "64kb" }));
 

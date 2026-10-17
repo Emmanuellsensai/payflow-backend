@@ -24,6 +24,8 @@ const schema = z.object({
   DATABASE_PATH: z.string().default("./payflow.db"),
   CORS_ORIGIN: z.string().default("*"),
   LOG_LEVEL: z.string().default("info"),
+  OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 });
 
 export type Config = z.infer<typeof schema>;

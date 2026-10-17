@@ -1,5 +1,6 @@
 export interface Loop {
-  stop(): void;
+  /** Stop scheduling passes. Resolves once the pass in flight, if any, has finished. */
+  stop(): Promise<void>;
 }
 
 /**
@@ -12,6 +13,7 @@ export interface Loop {
 export function every(intervalMs: number, pass: () => Promise<void>): Loop {
   let timer: NodeJS.Timeout | undefined;
   let stopped = false;
+  let current: Promise<void> = Promise.resolve();
 
   const run = async (): Promise<void> => {
     try {
@@ -19,14 +21,15 @@ export function every(intervalMs: number, pass: () => Promise<void>): Loop {
     } catch {
       // The pass logs its own failures.
     }
-    if (!stopped) timer = setTimeout(() => void run(), intervalMs);
+    if (!stopped) timer = setTimeout(() => void (current = run()), intervalMs);
   };
 
-  void run();
+  current = run();
   return {
     stop() {
       stopped = true;
       if (timer) clearTimeout(timer);
+      return current;
     },
   };
 }
