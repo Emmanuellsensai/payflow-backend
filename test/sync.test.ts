@@ -4,7 +4,7 @@ import { nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { openDatabase, readCursor, writeCursor } from "../src/lib/db.ts";
 import { Indexer, type IndexerRpc } from "../src/indexer.ts";
 import { Keeper, type KeeperRpc } from "../src/keeper.ts";
-import { every } from "../src/lib/loop.ts";
+import { drain, every } from "../src/lib/loop.ts";
 import type { Config } from "../src/config.ts";
 
 const MERCHANT = "GB343X4K4TIYARSAAQZ55RIZY2YLFNOQCM3LNQSRBV56TMVGIF55WCOH";
@@ -355,6 +355,16 @@ describe("loop", () => {
     await new Promise((r) => setTimeout(r, 10));
     await loop.stop();
     assert.equal(finished, true);
+  });
+
+  test("drain gives up on a pass that never finishes", async () => {
+    const stuck = every(1, () => new Promise<void>(() => {}));
+    assert.equal(await drain([stuck], 50), "timeout");
+  });
+
+  test("drain resolves once passes finish", async () => {
+    const quick = every(1, async () => {});
+    assert.equal(await drain([quick], 1000), "drained");
   });
 
   test("keeps going after a pass throws", async () => {

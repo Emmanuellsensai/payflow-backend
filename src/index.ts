@@ -5,7 +5,7 @@ import { createApp } from "./app.ts";
 import { Indexer } from "./indexer.ts";
 import { Keeper } from "./keeper.ts";
 import { logger } from "./lib/logger.ts";
-import { every, type Loop } from "./lib/loop.ts";
+import { drain, every, type Loop } from "./lib/loop.ts";
 import { initTelemetry, withSpan } from "./lib/telemetry.ts";
 
 const config = loadConfig();
@@ -92,13 +92,7 @@ async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, "shutting down");
   // Let a pass that is mid-write or mid-transaction finish before the database
   // closes, but never hang forever on a stuck RPC call.
-  let timer: NodeJS.Timeout | undefined;
-  const timedOut = new Promise<"timeout">((resolve) => {
-    timer = setTimeout(() => resolve("timeout"), config.SHUTDOWN_TIMEOUT_MS);
-  });
-  const drained = Promise.all(loops.map((loop) => loop.stop())).then(() => "drained" as const);
-  const outcome = await Promise.race([drained, timedOut]);
-  clearTimeout(timer);
+  const outcome = await drain(loops, config.SHUTDOWN_TIMEOUT_MS);
   if (outcome === "timeout") logger.warn({ timeoutMs: config.SHUTDOWN_TIMEOUT_MS }, "passes still running; closing anyway");
   await stopTelemetry().catch(() => {});
   http.close(() => {

@@ -33,3 +33,20 @@ export function every(intervalMs: number, pass: () => Promise<void>): Loop {
     },
   };
 }
+
+/**
+ * Stop every loop and wait for the passes in flight, giving up after
+ * `timeoutMs` so a stuck RPC call cannot block shutdown forever.
+ */
+export async function drain(loops: Loop[], timeoutMs: number): Promise<"drained" | "timeout"> {
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  const drained = Promise.all(loops.map((loop) => loop.stop())).then(() => "drained" as const);
+  try {
+    return await Promise.race([drained, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
