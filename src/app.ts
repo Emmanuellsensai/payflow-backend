@@ -36,7 +36,13 @@ export function createApp(db: DatabaseSync, config: Config, indexer?: IndexerSta
       });
     });
   });
-  app.use(cors({ origin: config.CORS_ORIGIN === "*" ? true : config.CORS_ORIGIN.split(",") }));
+  app.use(
+    cors({
+      origin: config.CORS_ORIGIN === "*" ? true : config.CORS_ORIGIN.split(","),
+      // Browsers hide non-safelisted response headers from scripts unless exposed.
+      exposedHeaders: ["X-Request-Id"],
+    }),
+  );
   app.use(express.json({ limit: "64kb" }));
 
   // Always 200 so a slow backfill does not get the service restarted; the

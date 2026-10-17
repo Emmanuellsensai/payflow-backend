@@ -182,4 +182,9 @@ describe("http api", () => {
     const echoed = await fetch(`${base}/health`, { headers: { "X-Request-Id": "abc-123" } });
     assert.equal(echoed.headers.get("x-request-id"), "abc-123");
   });
+
+  test("X-Request-Id is exposed to browsers through CORS", async () => {
+    const res = await fetch(`${base}/health`, { headers: { Origin: "http://localhost:3000" } });
+    assert.match(res.headers.get("access-control-expose-headers") ?? "", /x-request-id/i);
+  });
 });
